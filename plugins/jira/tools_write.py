@@ -250,6 +250,13 @@ def set_text_field(params):
     value = params.get("value", "")
     dry_run = params.get("dry_run", True)
 
+    # Name-array fields expect [{"name": ...}]
+    if field_name in ("fixVersions", "versions", "affectsVersions", "components"):
+        if isinstance(value, str):
+            value = [{"name": value}] if value.strip() else []
+        elif isinstance(value, list):
+            value = normalize_components(value)
+
     if dry_run:
         return {
             "dry_run": True,
@@ -260,7 +267,7 @@ def set_text_field(params):
         }
 
     # Cloud v3 API requires ADF for description
-    if handler.is_cloud and field_name == "description":
+    if handler.is_cloud and field_name == "description" and isinstance(value, (str, dict, type(None))):
         value = text_to_adf(value)
 
     status, body, _ = handler.http("PUT", f"/rest/api/2/issue/{issue_key}", body={"fields": {field_name: value}})
