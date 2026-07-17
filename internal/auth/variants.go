@@ -9,7 +9,7 @@ import (
 // KnownProviderTypes lists the built-in auth provider type names.
 // This is the single source of truth shared by the server and CLI.
 var KnownProviderTypes = []string{
-	"bearer", "basic", "kerberos/spnego", "oauth2", "refresh_token",
+	"bearer", "basic", "kerberos/spnego", "oauth2", "refresh_token", "github_app",
 }
 
 // IsKnownProviderType reports whether name is a recognized provider type.
@@ -57,6 +57,11 @@ type SingleAuthConfig struct {
 	CredentialsDir  string
 	TokenURL        string
 	ClientID        string
+	AppID           string
+	InstallationID  string
+	PrivateKey      string
+	PrivateKeyFile  string
+	BaseURL         string
 	Transport       http.RoundTripper // safe transport injected by plugin manager
 }
 
@@ -111,6 +116,16 @@ func providerFromConfig(typeName string, cfg SingleAuthConfig) (Provider, error)
 		return NewOAuth2Provider(cfg.TokenFile, cfg.CredentialsFile, cfg.Scopes, cfg.CredentialsDir, cfg.Transport)
 	case "refresh_token":
 		return NewRefreshTokenProvider(cfg.TokenURL, cfg.ClientID, cfg.Token, cfg.Transport, cfg.TokenFile)
+	case "github_app":
+		privateKeyPEM := []byte(cfg.PrivateKey)
+		if cfg.PrivateKeyFile != "" {
+			data, err := loadPrivateKeyFile(cfg.PrivateKeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("github_app: load private key file: %w", err)
+			}
+			privateKeyPEM = data
+		}
+		return NewGitHubAppProvider(cfg.AppID, cfg.InstallationID, privateKeyPEM, cfg.BaseURL, cfg.Transport)
 	default:
 		return nil, fmt.Errorf("unknown auth type: %s", typeName)
 	}
