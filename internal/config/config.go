@@ -37,6 +37,7 @@ type Config struct {
 	Sandbox        SandboxConfig   `yaml:"sandbox"`
 	Providers      ProvidersConfig `yaml:"providers"`
 	Secrets        SecretsConfig   `yaml:"secrets"`
+	Server         ServerConfig    `yaml:"server"`
 }
 
 // HTTPConfig controls the HTTP proxy behavior.
@@ -219,6 +220,33 @@ type SandboxResourceLimits struct {
 	MaxFileSizeMB uint64 `yaml:"max_file_size_mb"`
 }
 
+// Transport values for ServerConfig.Transport.
+const (
+	TransportStdio          = "stdio"
+	TransportStreamableHTTP = "streamable-http"
+)
+
+// ServerConfig controls the MCP transport layer.
+type ServerConfig struct {
+	Transport string `yaml:"transport"`
+	Host      string `yaml:"host"`
+	Port      int    `yaml:"port"`
+}
+
+// Validate checks that ServerConfig fields are within valid ranges.
+func (s *ServerConfig) Validate() error {
+	if s.Transport != TransportStdio && s.Transport != TransportStreamableHTTP {
+		return fmt.Errorf("server.transport must be '%s' or '%s', got %q", TransportStdio, TransportStreamableHTTP, s.Transport)
+	}
+	if s.Port < 1 || s.Port > 65535 {
+		return fmt.Errorf("server.port must be 1-65535, got %d", s.Port)
+	}
+	if s.Transport == TransportStreamableHTTP && s.Host == "" {
+		return fmt.Errorf("server.host must not be empty when transport is %s", TransportStreamableHTTP)
+	}
+	return nil
+}
+
 // ProvidersConfig controls which auth providers are active.
 type ProvidersConfig struct {
 	Disabled []string `yaml:"disabled"`
@@ -276,6 +304,11 @@ func DefaultConfig() *Config {
 				MaxPIDs:       64,
 				MaxFileSizeMB: 100,
 			},
+		},
+		Server: ServerConfig{
+			Transport: TransportStdio,
+			Host:      "localhost",
+			Port:      8080,
 		},
 	}
 }
@@ -341,6 +374,10 @@ func Load(configPath, workdir string) (*Config, error) {
 	}
 	if cfg.Stats.RetentionDays < 0 {
 		return nil, fmt.Errorf("stats.retention_days must be >= 0, got %d", cfg.Stats.RetentionDays)
+	}
+
+	if err := cfg.Server.Validate(); err != nil {
+		return nil, err
 	}
 
 	if err := ValidateVaultIDConfigs(cfg.Secrets.VaultIDs); err != nil {

@@ -687,6 +687,9 @@ func ReloadPlugin(ctx context.Context, srv *mcpserver.MCPServer, mgr *plugin.Man
 		collector.RemovePluginResources(name)
 	}
 
+	// Handle-level reload lock is acquired inside mgr.Reload(),
+	// after the manager's reloadMu, where it always sees the current handle.
+
 	// Reload the plugin (stops handler, re-reads manifest, restarts)
 	if err := mgr.Reload(ctx, name); err != nil {
 		return err

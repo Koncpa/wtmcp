@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -518,5 +519,173 @@ func TestContainsPath(t *testing.T) {
 	}
 	if containsPath(dirs, "/opt/plugins") {
 		t.Error("should not contain unknown path")
+	}
+}
+
+func TestDefaultConfigServerDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Server.Transport != "stdio" {
+		t.Errorf("Server.Transport = %q, want stdio", cfg.Server.Transport)
+	}
+	if cfg.Server.Host != "localhost" {
+		t.Errorf("Server.Host = %q, want localhost", cfg.Server.Host)
+	}
+	if cfg.Server.Port != 8080 {
+		t.Errorf("Server.Port = %d, want 8080", cfg.Server.Port)
+	}
+}
+
+func TestLoadConfigServerSection(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	cfgYAML := `
+server:
+  transport: streamable-http
+  host: 0.0.0.0
+  port: 9090
+`
+	if err := os.WriteFile(cfgFile, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgFile, dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Server.Transport != "streamable-http" {
+		t.Errorf("Transport = %q, want streamable-http", cfg.Server.Transport)
+	}
+	if cfg.Server.Host != "0.0.0.0" {
+		t.Errorf("Host = %q, want 0.0.0.0", cfg.Server.Host)
+	}
+	if cfg.Server.Port != 9090 {
+		t.Errorf("Port = %d, want 9090", cfg.Server.Port)
+	}
+}
+
+func TestLoadConfigServerPartialOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	cfgYAML := `
+server:
+  transport: streamable-http
+`
+	if err := os.WriteFile(cfgFile, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgFile, dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Server.Transport != "streamable-http" {
+		t.Errorf("Transport = %q, want streamable-http", cfg.Server.Transport)
+	}
+	if cfg.Server.Host != "localhost" {
+		t.Errorf("Host = %q, want localhost (default)", cfg.Server.Host)
+	}
+	if cfg.Server.Port != 8080 {
+		t.Errorf("Port = %d, want 8080 (default)", cfg.Server.Port)
+	}
+}
+
+func TestServerConfigValidate(t *testing.T) {
+	valid := &ServerConfig{Transport: TransportStreamableHTTP, Host: "localhost", Port: 8080}
+	if err := valid.Validate(); err != nil {
+		t.Errorf("valid config should pass: %v", err)
+	}
+
+	invalid := &ServerConfig{Transport: "websocket", Host: "localhost", Port: 8080}
+	if err := invalid.Validate(); err == nil {
+		t.Error("invalid transport should fail")
+	}
+
+	badPort := &ServerConfig{Transport: TransportStdio, Host: "localhost", Port: 0}
+	if err := badPort.Validate(); err == nil {
+		t.Error("port 0 should fail")
+	}
+
+	emptyHost := &ServerConfig{Transport: TransportStreamableHTTP, Host: "", Port: 8080}
+	if err := emptyHost.Validate(); err == nil {
+		t.Error("empty host with streamable-http should fail")
+	}
+
+	stdioEmptyHost := &ServerConfig{Transport: TransportStdio, Host: "", Port: 8080}
+	if err := stdioEmptyHost.Validate(); err != nil {
+		t.Errorf("empty host with stdio should pass: %v", err)
+	}
+}
+
+func TestLoadConfigServerInvalidTransport(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	cfgYAML := `
+server:
+  transport: websocket
+`
+	if err := os.WriteFile(cfgFile, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(cfgFile, dir)
+	if err == nil {
+		t.Fatal("expected error for invalid transport")
+	}
+	if !strings.Contains(err.Error(), "server.transport") {
+		t.Errorf("error should mention server.transport, got: %v", err)
+	}
+}
+
+func TestLoadConfigServerInvalidPort(t *testing.T) {
+	tests := []struct {
+		name string
+		port string
+	}{
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"too high", "99999"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgFile := filepath.Join(dir, "config.yaml")
+			cfgYAML := fmt.Sprintf("server:\n  port: %s\n", tt.port)
+			if err := os.WriteFile(cfgFile, []byte(cfgYAML), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(cfgFile, dir)
+			if err == nil {
+				t.Fatalf("expected error for port %s", tt.port)
+			}
+			if !strings.Contains(err.Error(), "server.port") {
+				t.Errorf("error should mention server.port, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigServerEmptyHost(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	cfgYAML := `
+server:
+  transport: streamable-http
+  host: ""
+`
+	if err := os.WriteFile(cfgFile, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(cfgFile, dir)
+	if err == nil {
+		t.Fatal("expected error for empty host with streamable-http")
+	}
+	if !strings.Contains(err.Error(), "server.host") {
+		t.Errorf("error should mention server.host, got: %v", err)
 	}
 }

@@ -41,6 +41,7 @@ type Handle struct {
 	outputDir      string
 	resolvedConfig json.RawMessage // snapshot from preparePlugin, avoids racing on manifest field
 	mu             sync.Mutex      // serialize tool calls for concurrency:1
+	reloadMu       sync.RWMutex    // serializes reload against in-flight tool calls
 	resMu          sync.RWMutex    // protects resources
 	restartMu      sync.Mutex      // protects restarts slice
 	resources      []protocol.ResourceDef
@@ -122,9 +123,22 @@ func (h *Handle) Stop(ctx context.Context) error {
 // For persistent plugins, sends via the transport.
 // For oneshot plugins, spawns a fresh process per call.
 func (h *Handle) CallTool(ctx context.Context, toolName string, params json.RawMessage) (*CallToolResult, error) {
+	h.reloadMu.RLock()
+	defer h.reloadMu.RUnlock()
+
 	if h.manifest.Concurrency <= 1 {
 		h.mu.Lock()
 		defer h.mu.Unlock()
+	}
+
+	// After a reload, the old handle's process is stopped. Callers that
+	// were blocked at reloadMu.RLock during the reload will reach here
+	// with a dead process. Return a clear error instead of a broken pipe.
+	if h.manifest.Execution == "persistent" && h.process != nil && h.process.State() == StateStopping {
+		return nil, &protocol.Error{
+			Code:    "plugin_reloaded",
+			Message: fmt.Sprintf("%s was reloaded while this call was waiting; retry the tool call", h.manifest.Name),
+		}
 	}
 
 	// Auto-restart crashed persistent plugins (rate-limited).
@@ -382,6 +396,17 @@ func (h *Handle) SetResources(resources []protocol.ResourceDef) {
 	h.resMu.Lock()
 	defer h.resMu.Unlock()
 	h.resources = resources
+}
+
+// ReloadLock acquires the write side of the reload lock, blocking
+// until all in-flight tool calls complete. Call ReloadUnlock when done.
+func (h *Handle) ReloadLock() {
+	h.reloadMu.Lock()
+}
+
+// ReloadUnlock releases the reload write lock.
+func (h *Handle) ReloadUnlock() {
+	h.reloadMu.Unlock()
 }
 
 func (h *Handle) restartAllowed() bool {
