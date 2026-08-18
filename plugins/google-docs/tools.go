@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/LeGambiArt/wtmcp/pkg/pathutil"
@@ -663,6 +664,7 @@ type markdownSegment struct {
 	underline         bool
 	strikethrough     bool
 	linkURL           string
+	anchorSlug        string // heading anchor for intra-document links (e.g. "my-heading" from "#my-heading")
 	heading           int    // 0 for normal, 1-6 for heading levels
 	headingLineID     int    // unique ID per heading line, used to detect paragraph boundaries
 	orderedListItem   bool   // true if this is an ordered list item
@@ -811,7 +813,8 @@ func detectCode(doc *docs.Document) *CodeAnnotations {
 }
 
 // indentDepth converts a leading whitespace string to a nesting depth.
-// Per the markdown standard, each nesting level requires 4 spaces or 1 tab.
+// Each tab or 4-space group adds one level. A trailing group of 2-3
+// spaces also counts as one level, matching common markdown conventions.
 func indentDepth(indent string) int {
 	depth := 0
 	i := 0
@@ -824,7 +827,11 @@ func indentDepth(indent string) int {
 			depth++
 			i += 4
 		default:
-			i++
+			remaining := len(indent) - i
+			if remaining >= 2 {
+				depth++
+			}
+			i = len(indent)
 		}
 	}
 	return depth
@@ -1417,6 +1424,15 @@ func parseSimpleFormattingWithDepth(text string, depth int) []markdownSegment {
 				pos += linkMatch[1]
 				continue
 			}
+			// Anchor link — strip markdown syntax, defer resolution to heading bookmarks
+			if strings.HasPrefix(linkURL, "#") {
+				segments = append(segments, markdownSegment{
+					text:       linkText,
+					anchorSlug: linkURL[1:],
+				})
+				pos += linkMatch[1]
+				continue
+			}
 			// Rejected scheme — emit opening bracket as plain text and
 			// let the rest be parsed normally on subsequent iterations.
 		}
@@ -1439,6 +1455,28 @@ func isAllowedLinkScheme(rawURL string) bool {
 	return strings.HasPrefix(lower, "https://") ||
 		strings.HasPrefix(lower, "http://") ||
 		strings.HasPrefix(lower, "mailto:")
+}
+
+// slugifyHeading produces a GFM-compatible anchor slug from a heading string.
+// It lowercases, keeps letters/digits/spaces/hyphens, converts spaces to
+// hyphens, and trims leading/trailing hyphens.
+func slugifyHeading(text string) string {
+	lower := strings.ToLower(text)
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range lower {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_':
+			b.WriteRune(r)
+			prevHyphen = false
+		case r == ' ' || r == '-':
+			if !prevHyphen {
+				b.WriteRune('-')
+				prevHyphen = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // mergeSegments combines consecutive segments with identical formatting properties
@@ -1467,6 +1505,7 @@ func mergeSegments(segments []markdownSegment) []markdownSegment {
 			curr.underline == prev.underline &&
 			curr.strikethrough == prev.strikethrough &&
 			curr.linkURL == prev.linkURL &&
+			curr.anchorSlug == prev.anchorSlug &&
 			curr.heading == prev.heading &&
 			curr.headingLineID == prev.headingLineID &&
 			curr.orderedListItem == prev.orderedListItem &&
@@ -1586,6 +1625,7 @@ func insertMarkdownWithTables(docID string, title string, segments []markdownSeg
 		totalReplies := 0
 		var pendingSegments []markdownSegment
 		var tables []tableRecord
+		var allDeferredAnchors []deferredAnchor
 
 		// --- Phase 1: create document structure (text + empty tables) ---
 
@@ -1594,7 +1634,8 @@ func insertMarkdownWithTables(docID string, title string, segments []markdownSeg
 				// Flush preceding text via BatchUpdate; use the returned
 				// final index instead of a Documents.Get round-trip.
 				if len(pendingSegments) > 0 {
-					textReqs, finalIdx := convertMarkdownToRequests(pendingSegments, currentIndex, false)
+					textReqs, finalIdx, anchors := convertMarkdownToRequests(pendingSegments, currentIndex, false)
+					allDeferredAnchors = append(allDeferredAnchors, anchors...)
 					if len(textReqs) > 0 {
 						resp, err := docsSvc.Documents.BatchUpdate(docID, &docs.BatchUpdateDocumentRequest{
 							Requests: textReqs,
@@ -1673,7 +1714,8 @@ func insertMarkdownWithTables(docID string, title string, segments []markdownSeg
 
 		// Flush any trailing text after the last table.
 		if len(pendingSegments) > 0 {
-			textReqs, _ := convertMarkdownToRequests(pendingSegments, currentIndex, true)
+			textReqs, _, anchors := convertMarkdownToRequests(pendingSegments, currentIndex, true)
+			allDeferredAnchors = append(allDeferredAnchors, anchors...)
 			if len(textReqs) > 0 {
 				resp, err := docsSvc.Documents.BatchUpdate(docID, &docs.BatchUpdateDocumentRequest{
 					Requests: textReqs,
@@ -1684,6 +1726,10 @@ func insertMarkdownWithTables(docID string, title string, segments []markdownSeg
 				totalReplies += len(resp.Replies)
 			}
 		}
+
+		// Resolve anchor links now, while Phase 1 indices are still valid.
+		// Phase 2 cell population shifts post-table indices forward.
+		anchorWarnings := resolveAnchorLinks(docID, allDeferredAnchors)
 
 		// --- Phase 2: populate all table cells (chunked) ---
 		//
@@ -1708,32 +1754,42 @@ func insertMarkdownWithTables(docID string, title string, segments []markdownSeg
 			totalReplies += len(resp.Replies)
 		}
 
-		return map[string]any{
+		result := map[string]any{
 			"document_id":  docID,
 			"title":        title,
 			"status":       "success",
 			"insert_index": insertIndex,
 			"replies":      totalReplies,
 			"tables":       tableCount,
-		}, nil
+		}
+		if len(anchorWarnings) > 0 {
+			result["unresolved_anchors"] = anchorWarnings
+		}
+		return result, nil
 	}
 
 	// No tables — single-batch insertion.
-	requests, _ := convertMarkdownToRequests(segments, insertIndex, true)
+	requests, _, deferredAnchors := convertMarkdownToRequests(segments, insertIndex, true)
 	batchUpdateReq := &docs.BatchUpdateDocumentRequest{Requests: requests}
 	resp, err := docsSvc.Documents.BatchUpdate(docID, batchUpdateReq).Do()
 	if err != nil {
 		return nil, fmt.Errorf("batch update: %w", err)
 	}
 
-	return map[string]any{
+	anchorWarnings := resolveAnchorLinks(docID, deferredAnchors)
+
+	result := map[string]any{
 		"document_id":  docID,
 		"title":        title,
 		"status":       "success",
 		"insert_index": insertIndex,
 		"replies":      len(resp.Replies),
 		"tables":       0,
-	}, nil
+	}
+	if len(anchorWarnings) > 0 {
+		result["unresolved_anchors"] = anchorWarnings
+	}
+	return result, nil
 }
 
 // collectTableCellRequests builds all cell-population requests for a table in
@@ -1949,14 +2005,22 @@ func populateTableCell(cell *tableCell, cellStartIndex int64) []*docs.Request {
 	return requests
 }
 
+type deferredAnchor struct {
+	startIndex    int64
+	endIndex      int64
+	tabsAtCollect int64
+	slug          string
+}
+
 // convertMarkdownToRequests converts markdown segments to Google Docs API requests.
 // When stripTrailingNewline is true, the trailing \n is removed from the last
 // text segment to avoid an unwanted empty paragraph at the document end.
 // Pass false when flushing mid-document text before a table.
-func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, stripTrailingNewline bool) ([]*docs.Request, int64) {
+func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, stripTrailingNewline bool) ([]*docs.Request, int64, []deferredAnchor) {
 	var requests []*docs.Request
 	currentIndex := startIndex
 	var tabsInserted int64
+	var deferredAnchors []deferredAnchor
 
 	// Merge consecutive segments with identical formatting to reduce API requests
 	segments = mergeSegments(segments)
@@ -2463,6 +2527,15 @@ func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, str
 		var textStyle *docs.TextStyle
 		var fields []string
 
+		if seg.anchorSlug != "" {
+			deferredAnchors = append(deferredAnchors, deferredAnchor{
+				startIndex:    currentIndex,
+				endIndex:      endIndex,
+				tabsAtCollect: tabsInserted,
+				slug:          seg.anchorSlug,
+			})
+		}
+
 		if seg.isInlineCode {
 			// Inline code: apply Courier New font, preserve bold/italic/underline
 			textStyle = &docs.TextStyle{
@@ -2475,7 +2548,7 @@ func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, str
 				Strikethrough: seg.strikethrough,
 			}
 			fields = []string{"weightedFontFamily", "bold", "italic", "underline", "strikethrough"}
-			if seg.linkURL != "" {
+			if seg.anchorSlug == "" && seg.linkURL != "" {
 				textStyle.Link = &docs.Link{
 					Url: seg.linkURL,
 				}
@@ -2489,7 +2562,7 @@ func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, str
 				Strikethrough: seg.strikethrough,
 			}
 
-			if seg.linkURL != "" {
+			if seg.anchorSlug == "" && seg.linkURL != "" {
 				textStyle.Link = &docs.Link{
 					Url: seg.linkURL,
 				}
@@ -2500,7 +2573,7 @@ func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, str
 			// monospace font (e.g. from an adjacent inline-code segment) is
 			// cleared and the document default font is restored.
 			fields = []string{"weightedFontFamily", "bold", "italic", "underline", "strikethrough"}
-			if seg.linkURL != "" {
+			if seg.linkURL != "" && seg.anchorSlug == "" {
 				fields = append(fields, "link")
 			}
 		}
@@ -2590,7 +2663,85 @@ func convertMarkdownToRequests(segments []markdownSegment, startIndex int64, str
 	// CreateParagraphBullets removes the leading tabs that were prepended
 	// for list nesting.  Subtract them so the returned index reflects the
 	// document state after the BatchUpdate executes.
-	return requests, currentIndex - tabsInserted
+	return requests, currentIndex - tabsInserted, deferredAnchors
+}
+
+func resolveAnchorLinks(docID string, anchors []deferredAnchor) []string {
+	if len(anchors) == 0 {
+		return nil
+	}
+
+	doc, err := docsSvc.Documents.Get(docID).Do()
+	if err != nil {
+		return []string{fmt.Sprintf("failed to read document for heading resolution: %v", err)}
+	}
+
+	if doc.Body == nil {
+		return []string{"document body is empty, cannot resolve heading anchors"}
+	}
+
+	headingMap := make(map[string]string)
+	for _, elem := range doc.Body.Content {
+		if elem.Paragraph == nil || elem.Paragraph.ParagraphStyle == nil {
+			continue
+		}
+		style := elem.Paragraph.ParagraphStyle
+		if !strings.HasPrefix(style.NamedStyleType, "HEADING_") || style.HeadingId == "" {
+			continue
+		}
+		var text strings.Builder
+		for _, e := range elem.Paragraph.Elements {
+			if e.TextRun != nil {
+				text.WriteString(e.TextRun.Content)
+			}
+		}
+		slug := slugifyHeading(strings.TrimSpace(text.String()))
+		if slug == "" {
+			continue
+		}
+		if _, exists := headingMap[slug]; !exists {
+			headingMap[slug] = style.HeadingId
+		}
+	}
+
+	var warnings []string
+	var requests []*docs.Request
+	for _, anchor := range anchors {
+		headingID, ok := headingMap[anchor.slug]
+		if !ok {
+			warnings = append(warnings, anchor.slug)
+			continue
+		}
+		adjustedStart := anchor.startIndex - anchor.tabsAtCollect
+		adjustedEnd := anchor.endIndex - anchor.tabsAtCollect
+		requests = append(requests, &docs.Request{
+			UpdateTextStyle: &docs.UpdateTextStyleRequest{
+				Range: &docs.Range{
+					StartIndex: adjustedStart,
+					EndIndex:   adjustedEnd,
+				},
+				TextStyle: &docs.TextStyle{
+					Link: &docs.Link{
+						Heading: &docs.HeadingLink{
+							Id: headingID,
+						},
+					},
+				},
+				Fields: "link",
+			},
+		})
+	}
+
+	if len(requests) > 0 {
+		_, err = docsSvc.Documents.BatchUpdate(docID, &docs.BatchUpdateDocumentRequest{
+			Requests: requests,
+		}).Do()
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("failed to apply heading links: %v", err))
+		}
+	}
+
+	return warnings
 }
 
 const maxReadFileSize = 10 << 20 // 10 MB
