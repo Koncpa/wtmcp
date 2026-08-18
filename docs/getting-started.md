@@ -8,8 +8,8 @@ mkdir -p -m 700 ~/.config/wtmcp/env.d
 cp env.d/jira.env.example ~/.config/wtmcp/env.d/jira.env
 # Edit ~/.config/wtmcp/env.d/jira.env with your credentials
 chmod 600 ~/.config/wtmcp/env.d/jira.env
-./wtmcpctl agent enable claude
-./wtmcpctl check
+./bin/wtmcpctl agent enable claude
+./bin/wtmcpctl check
 # Open Claude Code and ask: "Who am I in Jira?"
 ```
 
@@ -192,3 +192,38 @@ Multiple plugins can share one file — for example,
 single `env.d/google.env`.
 
 </details>
+
+## 5. Register with Your AI Client
+
+Run the following command from your project directory (or from `$HOME` for
+global registration — see the Note below):
+
+```bash
+./bin/wtmcpctl agent enable claude
+```
+
+Expected output:
+
+```
+✓ Enabled wtmcp for claude
+Config file: /path/to/project/.mcp.json
+```
+
+This command writes an `.mcp.json` file in the current directory. Your AI
+client reads that file at startup and uses it to discover the wtmcp server.
+**You never start the server manually** — the AI client launches it
+automatically whenever it needs to call an MCP tool.
+
+> **Tip:** The same command works for Gemini CLI and Cursor — just swap the
+> agent name:
+>
+> ```bash
+> ./bin/wtmcpctl agent enable gemini   # writes .gemini/settings.json
+> ./bin/wtmcpctl agent enable cursor   # writes .cursor/mcp.json
+> ```
+
+> **Note:** Registration is project-scoped by default. Running
+> `./bin/wtmcpctl agent enable claude` inside a project directory creates a
+> `.mcp.json` that applies only to that project. Running the same command from
+> `$HOME` creates `~/.mcp.json`, which Claude Code picks up for any project
+> that does not have its own `.mcp.json`.

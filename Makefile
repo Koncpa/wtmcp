@@ -33,7 +33,8 @@ wtmcp: arapuca $(shell find cmd/wtmcp -name '*.go') $(shell find internal -name 
 # Build wtmcpctl binary
 wtmcpctl: arapuca $(shell find cmd/wtmcpctl -name '*.go') $(shell find internal -name '*.go')
 	@echo "Building wtmcpctl..."
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o wtmcpctl ./cmd/wtmcpctl
+	@mkdir -p bin
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/wtmcpctl ./cmd/wtmcpctl
 
 # Build without arapuca sandbox (no libarapuca needed).
 # Requires WTMCP_UNSANDBOXED=1 at runtime.
@@ -131,7 +132,7 @@ pre-commit:
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
-	rm -f wtmcp wtmcpctl coverage.out
+	rm -f wtmcp bin/wtmcpctl coverage.out
 	rm -rf build/
 	rm -f plugins/*/handler
 	@for dir in plugins/*/; do \
