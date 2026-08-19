@@ -589,11 +589,13 @@ def _text_with_links(line: str) -> list[dict]:
         if not part:
             continue
         if _URL_RE.fullmatch(part):
-            nodes.append({
-                "type": "text",
-                "text": part,
-                "marks": [{"type": "link", "attrs": {"href": part}}],
-            })
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": part,
+                    "marks": [{"type": "link", "attrs": {"href": part}}],
+                }
+            )
         else:
             nodes.append({"type": "text", "text": part})
     return nodes or [{"type": "text", "text": line}]
