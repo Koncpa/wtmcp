@@ -484,6 +484,132 @@ def create_or_update_file(params):
     return result
 
 
+def commit_files(params):
+    """Commit multiple files in a single atomic commit.
+
+    Uses the Git Data API (blobs + trees + commits) to create one
+    commit containing all files. Shell scripts (.sh) automatically
+    get executable permission (100755); all other files get 100644.
+    """
+    repo = params.get("repo", "")
+    branch = params.get("branch", "main")
+    files = params.get("files", [])
+    message = params.get("message", "")
+    dry_run = params.get("dry_run", True)
+
+    _validate_repo(repo)
+    owner, name = _split_repo(repo)
+
+    if not isinstance(files, list) or not files:
+        raise ValueError("files is required and must be a non-empty array")
+    if not message:
+        raise ValueError("message is required")
+
+    for i, f in enumerate(files):
+        if not isinstance(f, dict):
+            raise ValueError(f"files[{i}]: expected an object, got {type(f).__name__}")
+        if not f.get("path") or not isinstance(f.get("path"), str):
+            raise ValueError(f"files[{i}]: 'path' is required and must be a non-empty string")
+        if "content" not in f:
+            raise ValueError(f"files[{i}]: 'content' is required")
+
+    def _file_mode(path):
+        return "100755" if path.endswith(".sh") else "100644"
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "action": "github_commit_files",
+            "repo": repo,
+            "branch": branch,
+            "message": message,
+            "file_count": len(files),
+            "files": [{"path": f["path"], "mode": _file_mode(f["path"])} for f in files],
+        }
+
+    # Step 1: resolve branch HEAD
+    status, body, _ = handler.http("GET", f"/repos/{owner}/{name}/git/ref/heads/{branch}")
+    if status < 200 or status >= 300 or not isinstance(body, dict):
+        return _http_error(status, body)
+    current_sha = (body.get("object") or {}).get("sha", "")
+    if not current_sha:
+        return {"error": f"could not resolve SHA for branch {branch}"}
+
+    # Step 2: get base tree from HEAD commit
+    status, body, _ = handler.http("GET", f"/repos/{owner}/{name}/git/commits/{current_sha}")
+    if status < 200 or status >= 300 or not isinstance(body, dict):
+        return _http_error(status, body)
+    base_tree = (body.get("tree") or {}).get("sha", "")
+    if not base_tree:
+        return {"error": "could not resolve base tree SHA"}
+
+    # Step 3: create a blob for each file
+    tree_entries = []
+    for f in files:
+        status, body, _ = handler.http(
+            "POST",
+            f"/repos/{owner}/{name}/git/blobs",
+            body={"content": f["content"], "encoding": "utf-8"},
+        )
+        if status < 200 or status >= 300 or not isinstance(body, dict):
+            return _http_error(status, body)
+        blob_sha = body.get("sha", "")
+        if not blob_sha:
+            return {"error": f"blob creation returned no SHA for {f['path']}"}
+        tree_entries.append(
+            {
+                "path": f["path"],
+                "mode": _file_mode(f["path"]),
+                "type": "blob",
+                "sha": blob_sha,
+            }
+        )
+
+    # Step 4: create tree containing all blobs
+    status, body, _ = handler.http(
+        "POST",
+        f"/repos/{owner}/{name}/git/trees",
+        body={"base_tree": base_tree, "tree": tree_entries},
+    )
+    if status < 200 or status >= 300 or not isinstance(body, dict):
+        return _http_error(status, body)
+    new_tree = body.get("sha", "")
+    if not new_tree:
+        return {"error": "tree creation returned no SHA"}
+
+    # Step 5: create commit
+    status, body, _ = handler.http(
+        "POST",
+        f"/repos/{owner}/{name}/git/commits",
+        body={"message": message, "tree": new_tree, "parents": [current_sha]},
+    )
+    if status < 200 or status >= 300 or not isinstance(body, dict):
+        return _http_error(status, body)
+    new_commit = body.get("sha", "")
+    if not new_commit:
+        return {"error": "commit creation returned no SHA"}
+
+    # Step 6: update branch ref
+    status, resp, headers = handler.http(
+        "PATCH",
+        f"/repos/{owner}/{name}/git/refs/heads/{branch}",
+        body={"sha": new_commit},
+    )
+    if status < 200 or status >= 300:
+        return _http_error(status, resp)
+
+    handler.invalidate_cache()
+    result = {
+        "commit": new_commit[:12],
+        "tree": new_tree[:12],
+        "branch": branch,
+        "file_count": len(files),
+        "files": [{"path": f["path"], "mode": _file_mode(f["path"])} for f in files],
+    }
+    _check_rate_limit(headers, result)
+    return result
+
+
 WRITE_TOOLS = {
     "github_create_review": create_review,
     "github_add_pr_comment": add_pr_comment,
@@ -491,4 +617,5 @@ WRITE_TOOLS = {
     "github_create_pull_request": create_pull_request,
     "github_create_branch": create_branch,
     "github_create_or_update_file": create_or_update_file,
+    "github_commit_files": commit_files,
 }

@@ -559,6 +559,45 @@ tools:
         default: true
         description: "Preview without creating (default: true)"
 
+  - name: github_commit_files
+    access: write
+    description: >
+      Commit multiple files to a branch in a single atomic commit.
+      Uses the Git Data API (blobs + trees) so all files land in one
+      commit. Shell scripts (.sh) automatically get executable
+      permission (100755). Defaults to dry_run=true.
+    params:
+      repo:
+        type: string
+        required: true
+        description: "Repository as owner/repo"
+      branch:
+        type: string
+        default: "main"
+        description: "Target branch"
+      files:
+        type: array
+        required: true
+        description: "Files to commit"
+        items:
+          type: object
+          required: [path, content]
+          properties:
+            path:
+              type: string
+              description: "File path in the repository"
+            content:
+              type: string
+              description: "File content (plain text)"
+      message:
+        type: string
+        required: true
+        description: "Commit message"
+      dry_run:
+        type: boolean
+        default: true
+        description: "Preview without committing (default: true)"
+
 setup:
   credentials:
     GITHUB_TOKEN:
